@@ -123,25 +123,60 @@ jobs:
 
           echo "🔍 Checking file: $file"
 
-          # Look for unsafe Collectors.toMap() patterns (without merge function)
-          unsafe_lines=$(grep -nE "Collectors\.toMap\s*\(\s*[^,)]+\s*,\s*[^,)]+\s*\)" "$file" || true)
+          # Create a temporary file to store only the added lines with their line numbers
+          temp_added_lines=$(mktemp)
+
+          # Extract added lines with line numbers using git diff
+          git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} "$file" | \
+          awk '
+          /^@@/ {
+            # Parse the @@ line to get the starting line number for additions
+            match($0, /\+([0-9]+)/, arr)
+            if (arr[1] != "") {
+              line_num = arr[1]
+            }
+          }
+          /^\+/ && !/^\+\+\+/ {
+            # This is an added line (not the +++ header)
+            print line_num ":" substr($0, 2)  # Remove the + prefix
+            line_num++
+          }
+          ' > "$temp_added_lines"
+
+          # Check if we have any added lines
+          if [ ! -s "$temp_added_lines" ]; then
+            echo "ℹ️ No added lines found in $file"
+            rm -f "$temp_added_lines"
+            continue
+          fi
+
+          echo "📝 Added lines in $file:"
+          cat "$temp_added_lines"
+
+          # Check only the added lines for unsafe Collectors.toMap() patterns
+          unsafe_lines=$(grep -E "Collectors\.toMap\s*\(\s*[^,)]+\s*,\s*[^,)]+\s*\)" "$temp_added_lines" || true)
 
           if [ -n "$unsafe_lines" ]; then
-            echo "⚠️  Found unsafe Collectors.toMap() usage in $file:"
+            echo "⚠️  Found unsafe Collectors.toMap() usage in added lines of $file:"
             echo "$unsafe_lines"
             violations_found=true
             violation_details="$violation_details\n**$file:**\n\\\`\\\`\\\`\n$unsafe_lines\n\\\`\\\`\\\`\n"
 
-            # Structured output: build JSON array
+            # Structured output: build JSON array for added lines only
             while IFS= read -r line; do
-              line_num=$(echo "$line" | cut -d: -f1)
-              line_content=$(echo "$line" | cut -d: -f2-)
-              violations_json=$(echo "$violations_json" | jq --arg file "$file" --arg line_num "$line_num" --arg content "$line_content" \
-                '. += [{"file": $file, "line": ($line_num | tonumber), "content": $content}]')
+              if [ -n "$line" ]; then
+                line_num=$(echo "$line" | cut -d: -f1)
+                line_content=$(echo "$line" | cut -d: -f2-)
+                violations_json=$(echo "$violations_json" | jq --arg file "$file" --arg line_num "$line_num" --arg content "$line_content" \
+                  '. += [{"file": $file, "line": ($line_num | tonumber), "content": $content}]')
+              fi
             done <<< "$unsafe_lines"
           else
-            echo "✅ No unsafe Collectors.toMap() usage in $file"
+            echo "✅ No unsafe Collectors.toMap() usage in added lines of $file"
           fi
+
+          # Clean up temporary file
+          rm -f "$temp_added_lines"
         done < changed_java_files.txt
 
         if [ "$violations_found" = true ]; then
@@ -206,7 +241,7 @@ jobs:
             const body = [
               "## ⚠️ Unsafe Collectors.toMap() Usage Found",
               "",
-              "The following changed files contain `Collectors.toMap()` usage without merge functions, which can cause runtime `IllegalStateException` if duplicate keys are encountered:",
+              "The following **newly added lines** contain `Collectors.toMap()` usage without merge functions, which can cause runtime `IllegalStateException` if duplicate keys are encountered:",
               "",
               violationDetails,
               "",
@@ -257,7 +292,7 @@ jobs:
             const body = [
               "## ✅ No Unsafe Collectors.toMap() Usage",
               "",
-              "All changed Java files are free of unsafe `Collectors.toMap()` usage! 🎉"
+              "All newly added lines in Java files are free of unsafe `Collectors.toMap()` usage! 🎉"
             ].join("\n");
 
             await github.rest.issues.createComment({
