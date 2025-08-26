@@ -188,39 +188,43 @@ jobs:
         script: |
           const violationDetails = `${{ steps.check-collectors.outputs.violation_details }}`;
 
+          const body = [
+            "## ⚠️ Unsafe Collectors.toMap() Usage Found",
+            "",
+            "The following changed files contain `Collectors.toMap()` usage without merge functions, which can cause runtime `IllegalStateException` if duplicate keys are encountered:",
+            "",
+            violationDetails,
+            "",
+            "### Recommended Solutions:",
+            "",
+            "**Option 1: Add merge function (Recommended)**",
+            "```java",
+            "// Instead of:",
+            ".collect(Collectors.toMap(keyMapper, valueMapper))",
+            "",
+            "// Use:",
+            ".collect(Collectors.toMap(keyMapper, valueMapper, mergeFunction))",
+            "```",
+            "",
+            "**Common merge functions:**",
+            "- `(existing, replacement) -> existing` - Keep first value",
+            "- `(existing, replacement) -> replacement` - Keep last value",
+            "- `(existing, replacement) -> { throw new IllegalStateException(\"Duplicate key\"); }` - Explicit error",
+            "",
+            "**Option 2: Verify uniqueness**",
+            "If keys are guaranteed unique, consider adding a comment explaining why no merge function is needed.",
+            "",
+            "### Why this matters:",
+            "`Collectors.toMap()` without a merge function throws `IllegalStateException` at runtime if duplicate keys are found. Adding an explicit merge function makes the behavior predictable and prevents runtime failures.",
+            "",
+            "Re-run this check by pushing new commits to the PR."
+          ].join("\n");
+
           await github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `## ⚠️ Unsafe Collectors.toMap() Usage Found
-
-          The following changed files contain \`Collectors.toMap()\` usage without merge functions, which can cause runtime \`IllegalStateException\` if duplicate keys are encountered:
-
-          ` + violationDetails + `
-
-          ### Recommended Solutions:
-
-          **Option 1: Add merge function (Recommended)**
-          \`\`\`java
-          // Instead of:
-          .collect(Collectors.toMap(keyMapper, valueMapper))
-
-          // Use:
-          .collect(Collectors.toMap(keyMapper, valueMapper, mergeFunction))
-          \`\`\`
-
-          **Common merge functions:**
-          - \`(existing, replacement) -> existing\` - Keep first value
-          - \`(existing, replacement) -> replacement\` - Keep last value
-          - \`(existing, replacement) -> { throw new IllegalStateException("Duplicate key"); }\` - Explicit error
-
-          **Option 2: Verify uniqueness**
-          If keys are guaranteed unique, consider adding a comment explaining why no merge function is needed.
-
-          ### Why this matters:
-          \`Collectors.toMap()\` without a merge function throws \`IllegalStateException\` at runtime if duplicate keys are found. Adding an explicit merge function makes the behavior predictable and prevents runtime failures.
-
-          Re-run this check by pushing new commits to the PR.`
+            body: body
           });
           
     - name: Success comment on PR
@@ -230,13 +234,17 @@ jobs:
         retries: 3
         retry-exempt-status-codes: 400,401,403,404,422
         script: |
+          const body = [
+            "## ✅ No Unsafe Collectors.toMap() Usage",
+            "",
+            "All changed Java files are free of unsafe `Collectors.toMap()` usage! 🎉"
+          ].join("\n");
+
           await github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
-            body: `## ✅ No Unsafe Collectors.toMap() Usage
-
-            All changed Java files are free of unsafe \`Collectors.toMap()\` usage! 🎉`
+            body: body
           });
 
     - name: Workflow completion
