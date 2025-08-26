@@ -18,4 +18,11 @@ public class UnsafeExample {
         return items.stream()
             .collect(Collectors.toMap(String::length, s -> s));
     }
+
+    public Map<String, String> createUnsafeMap2(List<String> items) {
+        // This should trigger the safety check warning
+        return items.stream()
+            .collect(Collectors.toMap(String::toLowerCase, Function.identity()));
+    }
+
 }
