@@ -187,11 +187,7 @@ jobs:
         retry-exempt-status-codes: 400,401,403,404,422
         script: |
           const violationDetails = `${{ steps.check-collectors.outputs.violation_details }}`;
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: `## ⚠️ Unsafe Collectors.toMap() Usage Found
+          const body = `## ⚠️ Unsafe Collectors.toMap() Usage Found
 
             The following changed files contain \`Collectors.toMap()\` usage without merge functions, which can cause runtime \`IllegalStateException\` if duplicate keys are encountered:
 
@@ -219,8 +215,14 @@ jobs:
             ### Why this matters:
             \`Collectors.toMap()\` without a merge function throws \`IllegalStateException\` at runtime if duplicate keys are found. Adding an explicit merge function makes the behavior predictable and prevents runtime failures.
 
-            Re-run this check by pushing new commits to the PR.`
-          })
+            Re-run this check by pushing new commits to the PR.`;
+
+          await github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
           
     - name: Success comment on PR
       if: steps.check-collectors.outputs.violations_found == 'false' && steps.changed-files.outputs.changed_files_exist == 'true'
@@ -229,14 +231,14 @@ jobs:
         retries: 3
         retry-exempt-status-codes: 400,401,403,404,422
         script: |
-          github.rest.issues.createComment({
+          await github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
             body: `## ✅ No Unsafe Collectors.toMap() Usage
 
             All changed Java files are free of unsafe \`Collectors.toMap()\` usage! 🎉`
-          })
+          });
 
     - name: Workflow completion
       if: always()
