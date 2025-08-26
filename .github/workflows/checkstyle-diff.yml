@@ -186,7 +186,8 @@ jobs:
         retries: 3
         retry-exempt-status-codes: 400,401,403,404,422
         script: |
-      const violationDetails = `${{ steps.check-collectors.outputs.violation_details }}`;          github.rest.issues.createComment({
+          const violationDetails = `${{ steps.check-collectors.outputs.violation_details }}`;
+          github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
@@ -228,7 +229,7 @@ jobs:
         retries: 3
         retry-exempt-status-codes: 400,401,403,404,422
         script: |
-      const violationDetails = `${{ steps.check-collectors.outputs.violation_details }}`;          github.rest.issues.createComment({
+          github.rest.issues.createComment({
             issue_number: context.issue.number,
             owner: context.repo.owner,
             repo: context.repo.repo,
