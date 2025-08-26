@@ -1,0 +1,279 @@
+name: Collectors.toMap() Safety Check
+
+on:
+  pull_request:
+    paths:
+      - 'src/**/*.java'
+      - 'conf/checkstyle/**'
+    types: [opened, synchronize, reopened]
+
+# Minimal permissions for security
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  collectors-safety-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for diff comparison
+        
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Cache Bazel
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/bazel
+          ~/.cache/bazelisk
+        key: ${{ runner.os }}-bazel-${{ hashFiles('WORKSPACE', '.bazelrc', '.bazelversion') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+          
+    - name: Install dependencies
+      run: |
+        # Install Bazelisk
+        curl -LO "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64"
+        chmod +x bazelisk-linux-amd64
+        sudo mv bazelisk-linux-amd64 /usr/local/bin/bazel
+
+        # Install jq for structured output processing
+        sudo apt-get update && sudo apt-get install -y jq
+        
+    - name: Get changed Java files
+      id: changed-files
+      run: |
+        set -euo pipefail
+
+        echo "Getting changed Java files between ${{ github.event.pull_request.base.sha }} and ${{ github.event.pull_request.head.sha }}"
+
+        # Validate SHA inputs (non-blocking)
+        if [[ ! "${{ github.event.pull_request.base.sha }}" =~ ^[a-f0-9]{40}$ ]] || \
+           [[ ! "${{ github.event.pull_request.head.sha }}" =~ ^[a-f0-9]{40}$ ]]; then
+          echo "⚠️ Invalid SHA format detected - skipping safety check"
+          echo "changed_files_exist=false" >> $GITHUB_OUTPUT
+          echo "file_count=0" >> $GITHUB_OUTPUT
+          echo "skip_reason=invalid_sha" >> $GITHUB_OUTPUT
+          exit 0  # Non-blocking: continue workflow but skip checks
+        fi
+
+        # Get list of changed Java files with error handling
+        if ! git diff --name-only ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }} \
+          | grep '\.java$' \
+          | grep '^src/' \
+          > changed_java_files.txt; then
+          # No Java files changed or git diff failed
+          touch changed_java_files.txt
+        fi
+
+        if [ -s changed_java_files.txt ]; then
+          file_count=$(wc -l < changed_java_files.txt)
+          echo "changed_files_exist=true" >> $GITHUB_OUTPUT
+          echo "file_count=$file_count" >> $GITHUB_OUTPUT
+          echo "✅ Found $file_count changed Java files:"
+          cat changed_java_files.txt
+        else
+          echo "changed_files_exist=false" >> $GITHUB_OUTPUT
+          echo "file_count=0" >> $GITHUB_OUTPUT
+          echo "skip_reason=no_java_files" >> $GITHUB_OUTPUT
+          echo "ℹ️ No Java files changed in src/ directory"
+        fi
+        
+    - name: Check for unsafe Collectors.toMap() in changed files
+      id: check-collectors
+      if: steps.changed-files.outputs.changed_files_exist == 'true'
+      run: |
+        echo "🔍 Checking for unsafe Collectors.toMap() usage in changed files..."
+
+        # Create script to check for unsafe Collectors.toMap() usage
+        cat > check_collectors_tomap.sh << 'EOF'
+        #!/bin/bash
+        set -euo pipefail
+
+        # Read changed files (non-blocking)
+        if [ ! -s changed_java_files.txt ]; then
+          echo "ℹ️ No changed Java files to check"
+          echo "violations_found=false" >> $GITHUB_OUTPUT
+          exit 0  # Non-blocking: successful completion
+        fi
+
+        echo "Files to check:"
+        cat changed_java_files.txt
+        echo
+
+        # Check each file for unsafe Collectors.toMap() usage
+        violations_found=false
+        violation_details=""
+        violations_json="[]"
+
+        while IFS= read -r file; do
+          # Input validation: check file exists and is readable
+          if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+            echo "⚠️ Cannot read file: $file (skipping)"
+            continue
+          fi
+
+          echo "🔍 Checking file: $file"
+
+          # Look for unsafe Collectors.toMap() patterns (without merge function)
+          unsafe_lines=$(grep -nE "Collectors\.toMap\s*\(\s*[^,)]+\s*,\s*[^,)]+\s*\)" "$file" || true)
+
+          if [ -n "$unsafe_lines" ]; then
+            echo "⚠️  Found unsafe Collectors.toMap() usage in $file:"
+            echo "$unsafe_lines"
+            violations_found=true
+            violation_details="$violation_details\n**$file:**\n\`\`\`\n$unsafe_lines\n\`\`\`\n"
+
+            # Structured output: build JSON array
+            while IFS= read -r line; do
+              line_num=$(echo "$line" | cut -d: -f1)
+              line_content=$(echo "$line" | cut -d: -f2-)
+              violations_json=$(echo "$violations_json" | jq --arg file "$file" --arg line_num "$line_num" --arg content "$line_content" \
+                '. += [{"file": $file, "line": ($line_num | tonumber), "content": $content}]')
+            done <<< "$unsafe_lines"
+          else
+            echo "✅ No unsafe Collectors.toMap() usage in $file"
+          fi
+        done < changed_java_files.txt
+
+        if [ "$violations_found" = true ]; then
+          echo
+          echo "⚠️  UNSAFE Collectors.toMap() USAGE FOUND IN CHANGED FILES"
+          echo
+          echo "The following files contain Collectors.toMap() without merge functions:"
+          echo -e "$violation_details"
+          echo
+          echo "This can cause runtime IllegalStateException if duplicate keys are encountered."
+          echo
+          echo "Consider using Collectors.toMap(keyMapper, valueMapper, mergeFunction) instead."
+          echo "Example merge functions:"
+          echo "  - (existing, replacement) -> existing  // Keep first"
+          echo "  - (existing, replacement) -> replacement  // Keep last"
+          echo "  - (existing, replacement) -> { throw new IllegalStateException(\"Duplicate key\"); }  // Explicit error"
+
+          # Set output for PR comment
+          echo "violations_found=true" >> $GITHUB_OUTPUT
+          echo "violation_details<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$violation_details" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "violations_json<<EOF" >> $GITHUB_OUTPUT
+          echo "$violations_json" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        else
+          echo "✅ No unsafe Collectors.toMap() usage found in changed files!"
+          echo "violations_found=false" >> $GITHUB_OUTPUT
+        fi
+        EOF
+
+        # Error handling: cleanup on exit
+        trap 'rm -f check_collectors_tomap.sh changed_java_files.txt' EXIT
+
+        chmod +x check_collectors_tomap.sh
+        ./check_collectors_tomap.sh
+        
+    - name: Comment on PR (if violations found)
+      if: steps.check-collectors.outputs.violations_found == 'true'
+      uses: actions/github-script@v7
+      with:
+        retries: 3
+        retry-exempt-status-codes: 400,401,403,404,422
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ⚠️ Unsafe Collectors.toMap() Usage Found
+
+            The following changed files contain \`Collectors.toMap()\` usage without merge functions, which can cause runtime \`IllegalStateException\` if duplicate keys are encountered:
+
+            ${{ steps.check-collectors.outputs.violation_details }}
+
+            ### Recommended Solutions:
+
+            **Option 1: Add merge function (Recommended)**
+            \`\`\`java
+            // Instead of:
+            .collect(Collectors.toMap(keyMapper, valueMapper))
+
+            // Use:
+            .collect(Collectors.toMap(keyMapper, valueMapper, mergeFunction))
+            \`\`\`
+
+            **Common merge functions:**
+            - \`(existing, replacement) -> existing\` - Keep first value
+            - \`(existing, replacement) -> replacement\` - Keep last value
+            - \`(existing, replacement) -> { throw new IllegalStateException("Duplicate key"); }\` - Explicit error
+
+            **Option 2: Verify uniqueness**
+            If keys are guaranteed unique, consider adding a comment explaining why no merge function is needed.
+
+            ### Why this matters:
+            \`Collectors.toMap()\` without a merge function throws \`IllegalStateException\` at runtime if duplicate keys are found. Adding an explicit merge function makes the behavior predictable and prevents runtime failures.
+
+            Re-run this check by pushing new commits to the PR.`
+          })
+          
+    - name: Success comment on PR
+      if: steps.check-collectors.outputs.violations_found == 'false' && steps.changed-files.outputs.changed_files_exist == 'true'
+      uses: actions/github-script@v7
+      with:
+        retries: 3
+        retry-exempt-status-codes: 400,401,403,404,422
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ✅ No Unsafe Collectors.toMap() Usage
+
+            All changed Java files are free of unsafe \`Collectors.toMap()\` usage! 🎉`
+          })
+
+    - name: Workflow completion
+      if: always()
+      run: |
+        echo "🏁 Collectors.toMap() safety check completed"
+        echo "This check provides warnings only and never blocks PR merging"
+        echo
+
+        # Determine what happened and provide appropriate message
+        if [ "${{ steps.check-collectors.conclusion }}" = "success" ]; then
+          # Check actually ran successfully
+          if [ "${{ steps.check-collectors.outputs.violations_found }}" = "true" ]; then
+            echo "⚠️ Unsafe usage detected - see PR comments for guidance"
+          else
+            echo "✅ No unsafe usage detected in changed files"
+          fi
+        elif [ "${{ steps.changed-files.outputs.skip_reason }}" = "invalid_sha" ]; then
+          echo "ℹ️ Safety check skipped - invalid SHA format detected"
+        elif [ "${{ steps.changed-files.outputs.skip_reason }}" = "no_java_files" ]; then
+          echo "ℹ️ Safety check skipped - no Java files changed in src/ directory"
+        elif [ "${{ steps.changed-files.outputs.changed_files_exist }}" = "false" ]; then
+          echo "ℹ️ Safety check skipped - no relevant file changes"
+        elif [ "${{ steps.check-collectors.conclusion }}" = "skipped" ]; then
+          echo "ℹ️ Safety check skipped - no files to analyze"
+        elif [ "${{ steps.check-collectors.conclusion }}" = "failure" ]; then
+          echo "⚠️ Safety check failed due to technical issues - please check workflow logs"
+          echo "   This does not indicate problems with your code"
+        elif [ "${{ steps.check-collectors.conclusion }}" = "cancelled" ]; then
+          echo "ℹ️ Safety check was cancelled"
+        else
+          echo "ℹ️ Safety check did not run (conclusion: ${{ steps.check-collectors.conclusion || 'unknown' }})"
+          echo "   Your PR is not affected - this is likely a workflow configuration issue"
+        fi
+
+        echo
+        echo "📊 Summary:"
+        echo "  - Files changed: ${{ steps.changed-files.outputs.file_count || 0 }}"
+        echo "  - Check status: ${{ steps.check-collectors.conclusion || 'skipped' }}"
+
+        # Always exit successfully to ensure non-blocking behavior
+        exit 0
